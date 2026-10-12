@@ -79,6 +79,8 @@ input string   InpTelegramChatId       = "";           // paste SNIPER_TELEGRAM_
 input bool     InpTelegramAlerts       = true;
 input bool     InpSendStartupPing      = true;         // send one Telegram message on EA init (works any day, proves the pipeline)
 
+input string   InpTradeLogFile         = "SniperEA_trades.csv";  // written under MQL5/Files/; one row per basket open/close
+
 //================================================================ state
 CTrade   trade;
 string   g_symbol;              // resolved broker symbol (suffix applied)
@@ -157,6 +159,30 @@ void Notify(string text)
    if(InpTelegramAlerts)
       TelegramSend(text);
    Print(text);
+  }
+
+//================================================================ CSV trade log (MQL5/Files/<InpTradeLogFile>)
+// One row per basket OPEN and CLOSE, so sessions/results can be analyzed later without scrolling
+// Telegram. Appends (FileSeek to end); writes a header once if the file does not already exist.
+void LogTradeEvent(string event, int side, string why, double legs_or_opened, double lot,
+                    double ref_price, double money)
+  {
+   bool isNew = !FileIsExist(InpTradeLogFile);
+   int h = FileOpen(InpTradeLogFile, FILE_READ | FILE_WRITE | FILE_CSV | FILE_ANSI, ',');
+   if(h == INVALID_HANDLE)
+     {
+      Print("LogTradeEvent: could not open ", InpTradeLogFile, ", error=", GetLastError());
+      return;
+     }
+   if(isNew)
+      FileWrite(h, "time_utc", "event", "symbol", "side", "legs", "lot", "ref_price", "money", "why");
+   FileSeek(h, 0, SEEK_END);
+   datetime now = TimeGMT();
+   FileWrite(h, TimeToString(now, TIME_DATE | TIME_SECONDS), event, g_symbol,
+             (side == 1 ? "BUY" : "SELL"), legs_or_opened, lot,
+             DoubleToString(ref_price, (int)SymbolInfoInteger(g_symbol, SYMBOL_DIGITS)),
+             DoubleToString(money, 2), why);
+   FileClose(h);
   }
 
 //================================================================ indicators (match strategy.py exactly)
@@ -372,6 +398,7 @@ void CloseAll(const ulong &tickets[], string why, int side)
    g_cooldown_until = TimeGMT() + InpCooldownSeconds;
 
    string label = (side == 1) ? "BUY" : "SELL";
+   LogTradeEvent("CLOSE", side, why, closed, InpLotSize, 0.0, money);
    Notify(StringFormat("%s <b>BASKET CLOSED</b> - %s\n%s %d x %.2f %s\nResult: %s$%.2f",
           (won ? "\xE2\x9C\x85" : "\xE2\x9D\x8C"), why, label, closed, InpLotSize, g_symbol,
           (money >= 0 ? "+" : "-"), MathAbs(money)));
@@ -444,6 +471,7 @@ void OpenBasket(int side, string why)
       Print("no legs opened - basket abandoned");
       return;
      }
+   LogTradeEvent("OPEN", side, why, opened, lot, ref, 0.0);
    Notify(StringFormat("%s <b>BASKET OPEN</b> - %s\n%s %d x %.2f %s @ %.*f\nTarget: +$%.2f  Stop: -$%.2f\n%s",
           (side == 1 ? "\xF0\x9F\x9F\xA2" : "\xF0\x9F\x94\xB4"), label, label, opened, lot, g_symbol,
           digits, ref, InpBasketProfitTargetUSD, InpStopLossUSD, why));
