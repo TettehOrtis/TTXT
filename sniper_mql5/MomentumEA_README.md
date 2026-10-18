@@ -126,7 +126,7 @@ So $500 at 0.01 to 0.03 lot is the smallest sensible setup. $100 is too small.
 2. After 07:00 UTC the EA should start taking trades. On the real Zero data, variant 4 took about 17 a day (range 8 to 25).
 3. Open `MomentumEA_trades.csv` (pull it with scp, see `HANDOFF.md`). Look at `entry_delay_s` (should be a few seconds) and `spread_points`.
 4. Make sure no trade opened outside the rules: none before Monday 07:00 UTC, none 20:00-24:00 UTC, none on Sunday.
-5. After a week, compare dollars a trade and win rate with the research table above. Wins should be about 53-58% of trades for variant 4 (a $50 win against a $70 loss).
+5. After a week, compare dollars a trade and win rate with the research table above. With the filters on, variant 4 won about 60-61% of trades in the sealed test (a $50 win against a $70 loss; break-even is 58.3%, so the margin is only about 2-3 points).
 6. If prices freeze or nothing happens, use the runbook in `HANDOFF.md` section 2 (connection-drop incident).
 
 ## 8. Decisions still open
