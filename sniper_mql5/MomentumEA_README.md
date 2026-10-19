@@ -36,7 +36,8 @@ the server and in git. Nothing of it was deleted.
   +$30 / +$50 target and -$70 stop (after the $1.10 commission). At 0.01 lot the dollars are one tenth.
 - Targets and stops are measured from the **real fill price**: the EA sends the order with a stop and target, then moves
   them to the true fill, as the research did.
-- One trade at a time. Magic number is `990100 + variant` (so 990104 for variant 4). It cannot collide with SniperEA (990077).
+- **Bucket mode (version 2.00, 2026-10-19):** like the old Sniper, the EA opens `InpLegs` legs of `InpLot` lot each (default 5 x 0.02 = 0.10 lot in total) at the same moment. Every leg has the same stop and target at the broker, so all legs close together at the same price and the bucket wins or loses as one trade of the total lot. The bucket's total is the SUM of the legs (at 0.10 lot: about +$51 / -$69). Optional EA-side bucket dollar exits `InpBasketTargetUSD` / `InpBasketStopUSD` (0 = off) close all legs when the total reaches the number.
+- One bucket at a time. Magic number is `990100 + variant` (so 990104 for variant 4). It cannot collide with SniperEA (990077).
 
 Research names for the variants (for finding them in the result files):
 1 = `R3_E_E30_70`, 2 = `R4_M15PX200_T_E20SIDE_E30_70`, 3 = `R4_M15PX200_T_M5E20SIDE_E50_70`,
@@ -106,7 +107,9 @@ So $500 at 0.01 to 0.03 lot is the smallest sensible setup. $100 is too small.
 - **Server:** the Oracle Free Tier VM (address, SSH key location and the full runbook are in `sniper_mql5/HANDOFF.md`). MT5 runs under Wine, display `:99`.
 - **Account:** the demo account on `Exness-MT5Trial9` (login number in `HANDOFF.md`). **Balance was $4,501.70 on 2026-10-17.** The research was sized for $500; the owner plans to reset it to $500.
 - **Chart:** `XAUUSDm,H1`. The EA reads M1/M5/M15/M30 itself, so the chart timeframe does not matter. Symbol suffix `m` is found automatically.
-- **Settings:** variant 4, lot 0.01, loaded from `MQL5/Presets/MomentumEA_v4.set` on the server. That file holds the Telegram token, so it is **not** in git.
+- **Settings:** variant 4, 5 legs x 0.02 lot (0.10 total), loaded from `MQL5/Presets/MomentumEA_bucket.set` on the server (the earlier single-trade 0.01 preset is `MomentumEA_v4.set`). Those files hold the Telegram token, so they are **not** in git.
+- **Account:** it is a Standard demo (symbol suffix `m`, no commission, spread about $0.24 per 0.01 lot), not a Zero account. The research assumed Zero costs ($1.10 commission + 0.05 spread per 0.10 lot = about $1.60); here a 0.10-lot bucket pays about $2.40. The balance was reset to $500 on 2026-10-19.
+- **Risk at this size:** a stop-out costs about $69 (14% of $500) and a win pays about $51. In the 12-month account test, 0.10 lot on $500 was blown in 29% of runs (0.01 lot: 4%). Chosen by the owner on purpose; change `InpLegs` / `InpLot` to scale it.
 - **Files on the server** (`/home/ubuntu/.wine/drive_c/Program Files/MetaTrader 5/MQL5/`):
   `Experts/MomentumEA.mq5` and `.ex5`, `Presets/MomentumEA_v4.set`, and `Files/MomentumEA_trades.csv` (written when the first trade happens).
 - **Telegram:** same bot and chat as before. Every message is headed **"Momentum EA vN"**. Needs `https://api.telegram.org` in Tools > Options > Experts > Allow WebRequest (this setting resets on every terminal restart).
@@ -114,11 +117,12 @@ So $500 at 0.01 to 0.03 lot is the smallest sensible setup. $100 is too small.
 
 ## 6. The trade log (compare the demo with the research)
 
-`MomentumEA_trades.csv`, one row per OPEN and CLOSE:
-`time_utc, event, variant, symbol, side, lot, price, sl, tp, spread_points, entry_delay_s, profit_usd, reason`.
+`MomentumEA_bucket_trades.csv` (the single-trade version wrote `MomentumEA_trades.csv`), one row per bucket OPEN and CLOSE:
+`time_utc, event, variant, symbol, side, legs, lot_per_leg, price, sl, tp, spread_points, entry_delay_s, profit_usd, reason`.
+`profit_usd` on a CLOSE is the sum of all legs. `price` is the average fill.
 - `entry_delay_s` = seconds after the candle opened that the order went in. The research assumed 0.
 - `spread_points` = the spread at entry. The research used a flat 0.05 price units.
-- `reason` on a CLOSE is `TP`, `SL`, `TIME` (1-day limit), `WEEKEND` or `OTHER`.
+- `reason` on a CLOSE is `TP`, `SL`, `TIME` (1-day limit), `WEEKEND`, `BASKET_TP` / `BASKET_SL` (optional dollar exits) or `OTHER` (closed by hand or by another program).
 
 ## 7. What to check on Monday 2026-10-19
 
@@ -131,7 +135,7 @@ So $500 at 0.01 to 0.03 lot is the smallest sensible setup. $100 is too small.
 
 ## 8. Decisions still open
 
-- **Reset the demo balance to $500** so the test matches the research (it was $4,501.70).
+- **Account type.** The demo is Standard; a Zero demo (symbol suffix `z`) would match the research costs. Not decided.
 - **A daily loss limit.** None is set, as requested. In the older, calmer data a limit of -$200 to -$300 (at 0.10 lot; scale it with the lot) cut the worst day by 25-40% for a small cost. It was not tested on volatile days like 2 Feb 2026, and those are where it would matter.
 - **Which variant.** Four is the default. Three is the next best on the real data. One is the simplest but weakest on the Zero feed.
 - **Lot size.** Start at 0.01. Only raise it after the demo agrees with the research.
