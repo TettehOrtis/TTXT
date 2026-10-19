@@ -167,3 +167,8 @@ Scripts are `smc_bot/bt/aut16_layers.py` to `aut28_fxexam.py`.
 
 **Bottom line:** a research-backed gold rule, built and running on a demo, not proven. The point of the next few weeks is to see whether the demo's
 real fills and dollars a trade agree with the research. If they do, think about a bigger lot. If they do not, the CSV will show where they differ.
+
+## Version notes (2026-10-19)
+- **2.10** - only opens a bucket in the first 10 seconds of a new minute (`InpMaxEntryDelaySec`). A signal seen later in the minute (for example right after the previous bucket closed) is stale and skipped; the research always entered at the next bar open, and entering a minute late costs about $0.8-1.3 a trade there.
+- **2.20** - size rule (`InpWeakLegs`, default 2; set 0 to switch it off). A bucket gets the full 5 legs only when it opens within `InpChainSeconds` (125) of a WINNING bucket closing; after a loss, or fresh after a quiet spell, it opens 2 legs. Research (addendum 18, 2009-2020, all 5 variants, all 3 windows): profit factor 1.11-1.16 -> 1.18-1.25, worst day and drawdown down 30-50%. Found by looking at the data, so treat it as unproven until the demo log agrees. Also a spread safety (`InpMaxSpreadPoints` = 400; Standard gold is about 240).
+- Entry filters tested in the research (chasing, candle size, hours, trend agreement, ADX, Hurst, SuperTrend, FVG, ...) all made the win rate worse or did nothing; none is in the EA.

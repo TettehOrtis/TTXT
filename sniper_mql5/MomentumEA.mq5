@@ -35,7 +35,7 @@
 //| No daily profit/loss limit (owner's choice for this test).         |
 //+------------------------------------------------------------------+
 #property copyright "AUT16 research port"
-#property version   "2.10"
+#property version   "2.20"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -63,8 +63,10 @@ input bool   InpNoSunday           = true;
 input int    InpWeekendFlatHour    = 20;         // Friday UTC: close everything from this time
 input int    InpWeekendFlatMin     = 45;
 
+input int    InpWeakLegs           = 2;          // legs for a "weaker" bucket (fresh start or after a loss); 0 = off, every bucket uses InpLegs
+input int    InpChainSeconds       = 125;        // a bucket is "full size" only if it opens within this many seconds after a WINNING bucket closed
 input int    InpMaxEntryDelaySec   = 10;         // only enter in the first N seconds of a new M1 bar (0 = off); skips stale mid-bar re-entries
-input double InpMaxSpreadPoints    = 0.0;       // 0 = off (the research used a flat 0.05 price units)
+input double InpMaxSpreadPoints    = 400.0;     // safety: skip entries when the spread is wider than this (points); 0 = off. Standard gold is about 240
 input bool   InpDryRun             = false;      // true = log signals, place no orders
 
 input string InpTelegramToken      = "";
@@ -88,6 +90,8 @@ int      h_trend, h_e20m1, h_e20m5;
 ulong    g_ids[];                  // POSITION_IDENTIFIERs of the legs of the bucket we opened
 string   g_close_reason;           // set by us before a TIME / WEEKEND / BASKET close
 int      g_side;                   // side of the open bucket
+datetime g_last_close_time = 0;    // when the last bucket we ran closed
+bool     g_last_close_win  = false;
 
 //================================================================ helpers
 bool ResolveSymbol()
@@ -315,6 +319,17 @@ void OpenBucket(int side, string why)
    double tp = NormalizeDouble((side == 1) ? ref + g_targetDist : ref - g_targetDist, digits);
    double spread_pts = (tk.ask - tk.bid) / point;
 
+   // size rule (research, addendum 18): full bucket right after a winning bucket, smaller otherwise
+   int nLegs = InpLegs;
+   bool full = true;
+   if(InpWeakLegs > 0 && InpWeakLegs < InpLegs)
+     {
+      full = g_last_close_win && g_last_close_time > 0 && (TimeCurrent() - g_last_close_time) <= InpChainSeconds;
+      if(!full)
+         nLegs = InpWeakLegs;
+     }
+   why = why + (full ? " | full" : " | weak");
+
    if(InpMaxSpreadPoints > 0 && spread_pts > InpMaxSpreadPoints)
      {
       Print("signal skipped: spread ", spread_pts, " points > limit");
@@ -322,13 +337,13 @@ void OpenBucket(int side, string why)
      }
    if(InpDryRun)
      {
-      LogRow("SIGNAL", side, InpLegs, ref, sl, tp, spread_pts, 0, 0, why);
+      LogRow("SIGNAL", side, nLegs, ref, sl, tp, spread_pts, 0, 0, why);
       return;
      }
 
    // enough free margin for the whole bucket?
    double need = 0.0;
-   if(OrderCalcMargin((side == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, g_symbol, InpLot * InpLegs, ref, need) &&
+   if(OrderCalcMargin((side == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, g_symbol, InpLot * nLegs, ref, need) &&
       need > AccountInfoDouble(ACCOUNT_MARGIN_FREE) * 0.9)
      {
       Print("bucket skipped: margin needed ", need, " > 90% of free margin ", AccountInfoDouble(ACCOUNT_MARGIN_FREE));
@@ -336,14 +351,14 @@ void OpenBucket(int side, string why)
      }
 
    int opened = 0;
-   for(int i = 0; i < InpLegs; i++)
+   for(int i = 0; i < nLegs; i++)
      {
       string cm = "MOM" + IntegerToString(InpVariant) + "-" + IntegerToString(i + 1);
       bool ok = (side == 1) ? trade.Buy(InpLot, g_symbol, 0.0, sl, tp, cm)
                             : trade.Sell(InpLot, g_symbol, 0.0, sl, tp, cm);
       if(!ok)
         {
-         Print("leg ", i + 1, "/", InpLegs, " failed retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
+         Print("leg ", i + 1, "/", nLegs, " failed retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
          break;
         }
       opened++;
@@ -425,6 +440,8 @@ void LogCloseFromHistory()
    if(outs == 0)
       return;
    LogRow("CLOSE", g_side, outs, pxsum / outs, 0, 0, 0, 0, profit, reason);
+   g_last_close_time = TimeCurrent();
+   g_last_close_win = (profit > 0);
    Notify(StringFormat("%s <b>BUCKET CLOSED</b> %s\n%d legs, result: %s$%.2f", (profit > 0 ? "\xE2\x9C\x85" : "\xE2\x9D\x8C"),
           reason, outs, (profit >= 0 ? "+" : "-"), MathAbs(profit)));
    ArrayResize(g_ids, 0);
@@ -546,8 +563,8 @@ int OnInit()
    PrintFormat("MomentumEA v%d on %s | TimeGMT %02d:%02d  TimeCurrent %02d:%02d  TimeTradeServer %02d:%02d | %d legs x %.2f lot | dryrun=%s",
                InpVariant, g_symbol, a.hour, a.min, b.hour, b.min, c.hour, c.min, InpLegs, InpLot, InpDryRun ? "yes" : "no");
    if(InpSendStartupPing)
-      Notify(StringFormat("\xF0\x9F\xA4\x96 Started on %s, bucket of %d x %.2f lot (%.2f total)%s.\nSame exit as the research: target %.2f, stop %.2f of price.",
-             g_symbol, InpLegs, InpLot, InpLegs * InpLot, InpDryRun ? " (DRY RUN)" : "", g_targetDist, InpStopDist));
+      Notify(StringFormat("\xF0\x9F\xA4\x96 Started on %s, bucket of %d x %.2f lot (%.2f total)%s.\nSame exit as the research: target %.2f, stop %.2f of price.\nSize rule: full %d legs after a win, %d legs otherwise (0 = off).",
+             g_symbol, InpLegs, InpLot, InpLegs * InpLot, InpDryRun ? " (DRY RUN)" : "", g_targetDist, InpStopDist, InpLegs, InpWeakLegs));
    return INIT_SUCCEEDED;
   }
 
