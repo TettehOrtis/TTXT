@@ -35,7 +35,7 @@
 //| No daily profit/loss limit (owner's choice for this test).         |
 //+------------------------------------------------------------------+
 #property copyright "AUT16 research port"
-#property version   "2.00"
+#property version   "2.10"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -63,7 +63,8 @@ input bool   InpNoSunday           = true;
 input int    InpWeekendFlatHour    = 20;         // Friday UTC: close everything from this time
 input int    InpWeekendFlatMin     = 45;
 
-input double InpMaxSpreadPoints    = 0.0;        // 0 = off (the research used a flat 0.05 price units)
+input int    InpMaxEntryDelaySec   = 10;         // only enter in the first N seconds of a new M1 bar (0 = off); skips stale mid-bar re-entries
+input double InpMaxSpreadPoints    = 0.0;       // 0 = off (the research used a flat 0.05 price units)
 input bool   InpDryRun             = false;      // true = log signals, place no orders
 
 input string InpTelegramToken      = "";
@@ -460,6 +461,11 @@ void Step()
    if(bar == 0 || bar == g_last_bar)
       return;
    g_last_bar = bar;
+
+   // the research entered at the open of a new bar; a signal seen later in the bar (for example right
+   // after the previous bucket closed) is stale, so skip it and wait for the next bar
+   if(InpMaxEntryDelaySec > 0 && TimeCurrent() - bar > InpMaxEntryDelaySec)
+      return;
 
    string why;
    if(!EntriesAllowed(why))
