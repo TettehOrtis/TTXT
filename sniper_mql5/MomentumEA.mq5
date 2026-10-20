@@ -35,7 +35,7 @@
 //| No daily profit/loss limit (owner's choice for this test).         |
 //+------------------------------------------------------------------+
 #property copyright "AUT16 research port"
-#property version   "2.20"
+#property version   "3.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -64,6 +64,8 @@ input int    InpWeekendFlatHour    = 20;         // Friday UTC: close everything
 input int    InpWeekendFlatMin     = 45;
 
 input int    InpWeakLegs           = 2;          // legs for a "weaker" bucket (fresh start or after a loss); 0 = off, every bucket uses InpLegs
+input bool   InpSplit              = true;       // T3 split: 3 legs (20/30/50% of the size) at 50/75/100% of the target; after leg 1 hits, the stop of the others moves to entry; no new bucket until the plain fixed-exit trade would have finished (research addenda 22-23)
+input double InpBEOffset           = 0.11;       // price units: the commission-equivalent the research added to entry (stop move) and to each target
 input int    InpChainSeconds       = 125;        // a bucket is "full size" only if it opens within this many seconds after a WINNING bucket closed
 input int    InpMaxEntryDelaySec   = 10;         // only enter in the first N seconds of a new M1 bar (0 = off); skips stale mid-bar re-entries
 input double InpMaxSpreadPoints    = 400.0;     // safety: skip entries when the spread is wider than this (points); 0 = off. Standard gold is about 240
@@ -92,6 +94,12 @@ string   g_close_reason;           // set by us before a TIME / WEEKEND / BASKET
 int      g_side;                   // side of the open bucket
 datetime g_last_close_time = 0;    // when the last bucket we ran closed
 bool     g_last_close_win  = false;
+bool     g_be_done         = false;   // stop of the remaining legs already moved to entry
+bool     g_shadow_on       = false;   // the plain fixed-exit trade (target 100%, same stop) is still "running" in the background
+int      g_shadow_side     = 0;
+datetime g_shadow_bar      = 0;
+double   g_shadow_tp       = 0.0;
+double   g_shadow_sl       = 0.0;
 
 //================================================================ helpers
 bool ResolveSymbol()
@@ -304,6 +312,115 @@ void RememberLegs(const ulong &tickets[])
      }
   }
 
+//================================================================ T3 split helpers
+double TpDist(int k)   // k = 0,1,2 -> 50%, 75%, 100% of the target (the research: fraction x (target - offset) + offset)
+  {
+   double f[3] = {0.5, 0.75, 1.0};
+   return f[k] * (g_targetDist - InpBEOffset) + InpBEOffset;
+  }
+
+void SplitLots(double total, double &l[])   // 20% / 30% / 50% of the total, at the broker's lot step
+  {
+   double step = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_STEP);
+   double vmin = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_MIN);
+   if(step <= 0) step = 0.01;
+   ArrayResize(l, 3);
+   l[0] = MathMax(vmin, MathRound(total * 0.2 / step) * step);
+   l[1] = MathMax(vmin, MathRound(total * 0.3 / step) * step);
+   l[2] = total - l[0] - l[1];
+   if(l[2] < vmin)
+     {
+      l[2] = vmin;
+      l[1] = MathMax(vmin, total - l[0] - l[2]);
+     }
+   for(int i = 0; i < 3; i++)
+      l[i] = NormalizeDouble(l[i], 2);
+  }
+
+void EndShadow(string how)
+  {
+   g_shadow_on = false;
+   g_last_close_time = MathMax(g_last_close_time, TimeCurrent());   // the size rule counts from the moment the slot is released
+   Print("shadow trade finished (", how, ") - new buckets allowed");
+  }
+
+// The plain trade (target 100%, same stop) that the research would have taken; no new bucket until it has finished.
+void CheckShadow()
+  {
+   if(!g_shadow_on)
+      return;
+   if(WeekendFlatDue() || TimeCurrent() - g_shadow_bar >= InpMaxHoldMinutes * 60)
+     {
+      EndShadow("limit");
+      return;
+     }
+   MqlRates r[];
+   ArraySetAsSeries(r, false);
+   int got = CopyRates(g_symbol, PERIOD_M1, g_shadow_bar, TimeCurrent(), r);
+   if(got <= 0)
+      return;
+   double point = SymbolInfoDouble(g_symbol, SYMBOL_POINT);
+   for(int i = 0; i < got; i++)
+     {
+      double sp = r[i].spread * point;
+      bool slHit = (g_shadow_side == 1) ? (r[i].low <= g_shadow_sl) : (r[i].high + sp >= g_shadow_sl);
+      bool tpHit = (g_shadow_side == 1) ? (r[i].high >= g_shadow_tp) : (r[i].low + sp <= g_shadow_tp);
+      if(slHit || tpHit)
+        {
+         EndShadow(slHit ? "SL" : "TP");   // stop first inside a bar, as in the research
+         return;
+        }
+     }
+  }
+
+// After leg 1 (the 50% target) is gone, move the stop of the remaining legs to entry +/- offset (only ever tighten).
+void ManageSplit(const ulong &tickets[])
+  {
+   int digits = (int)SymbolInfoInteger(g_symbol, SYMBOL_DIGITS);
+   double point = SymbolInfoDouble(g_symbol, SYMBOL_POINT);
+   bool isSplit = false, haveT1 = false;
+   for(int i = 0; i < ArraySize(tickets); i++)
+     {
+      if(!PositionSelectByTicket(tickets[i])) continue;
+      string c = PositionGetString(POSITION_COMMENT);
+      if(StringFind(c, "-T") >= 0) isSplit = true;
+      if(StringFind(c, "-T1") >= 0) haveT1 = true;
+     }
+   if(!isSplit || haveT1)
+      return;
+   MqlTick tk;
+   if(!SymbolInfoTick(g_symbol, tk))
+      return;
+   int moved = 0;
+   for(int i = 0; i < ArraySize(tickets); i++)
+     {
+      if(!PositionSelectByTicket(tickets[i])) continue;
+      bool buy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      double open = PositionGetDouble(POSITION_PRICE_OPEN);
+      double cur = PositionGetDouble(POSITION_SL);
+      double be = NormalizeDouble(buy ? open + InpBEOffset : open - InpBEOffset, digits);
+      bool better = buy ? (cur < be - point) : (cur == 0.0 || cur > be + point);
+      if(!better)
+         continue;
+      bool through = buy ? (tk.bid <= be) : (tk.ask >= be);
+      if(through)
+        {
+         if(!trade.PositionClose(tickets[i]))
+            Print("BE close failed for ", tickets[i], " retcode=", trade.ResultRetcode());
+         moved++;
+        }
+      else if(trade.PositionModify(tickets[i], be, PositionGetDouble(POSITION_TP)))
+         moved++;
+      else
+         Print("BE move failed for ", tickets[i], " retcode=", trade.ResultRetcode());
+     }
+   if(moved > 0 && !g_be_done)
+     {
+      g_be_done = true;
+      Notify("\xF0\x9F\x9B\xA1 Leg 1 hit its target: stop of the remaining legs moved to entry.");
+     }
+  }
+
 void OpenBucket(int side, string why)
   {
    int digits = (int)SymbolInfoInteger(g_symbol, SYMBOL_DIGITS);
@@ -350,15 +467,30 @@ void OpenBucket(int side, string why)
       return;
      }
 
+   int nPlan = InpSplit ? 3 : nLegs;
+   double legLot[];
+   ArrayResize(legLot, nPlan);
+   if(InpSplit)
+      SplitLots(InpLot * nLegs, legLot);
+   else
+      for(int i = 0; i < nPlan; i++)
+         legLot[i] = InpLot;
+   string legtxt = "";
+   for(int i = 0; i < nPlan; i++)
+      legtxt += (i > 0 ? "+" : "") + DoubleToString(legLot[i], 2);
+   if(InpSplit)
+      why = why + " | T3 " + legtxt;
+
    int opened = 0;
-   for(int i = 0; i < nLegs; i++)
+   for(int i = 0; i < nPlan; i++)
      {
-      string cm = "MOM" + IntegerToString(InpVariant) + "-" + IntegerToString(i + 1);
-      bool ok = (side == 1) ? trade.Buy(InpLot, g_symbol, 0.0, sl, tp, cm)
-                            : trade.Sell(InpLot, g_symbol, 0.0, sl, tp, cm);
+      string cm = "MOM" + IntegerToString(InpVariant) + "-" + (InpSplit ? "T" : "") + IntegerToString(i + 1);
+      double tpi = InpSplit ? NormalizeDouble((side == 1) ? ref + TpDist(i) : ref - TpDist(i), digits) : tp;
+      bool ok = (side == 1) ? trade.Buy(legLot[i], g_symbol, 0.0, sl, tpi, cm)
+                            : trade.Sell(legLot[i], g_symbol, 0.0, sl, tpi, cm);
       if(!ok)
         {
-         Print("leg ", i + 1, "/", nLegs, " failed retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
+         Print("leg ", i + 1, "/", nPlan, " failed retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription());
          break;
         }
       opened++;
@@ -379,7 +511,19 @@ void OpenBucket(int side, string why)
       double fill = PositionGetDouble(POSITION_PRICE_OPEN);
       sumfill += fill;
       double sl2 = NormalizeDouble((side == 1) ? fill - InpStopDist : fill + InpStopDist, digits);
-      double tp2 = NormalizeDouble((side == 1) ? fill + g_targetDist : fill - g_targetDist, digits);
+      double tpd2 = g_targetDist;
+      if(InpSplit)
+        {
+         string c2 = PositionGetString(POSITION_COMMENT);
+         int pp = StringFind(c2, "-T");
+         int kk = (pp >= 0) ? (int)StringToInteger(StringSubstr(c2, pp + 2)) : 0;
+         if(kk >= 1 && kk <= 3)
+            tpd2 = TpDist(kk - 1);
+        }
+      double tp2 = NormalizeDouble((side == 1) ? fill + tpd2 : fill - tpd2, digits);
+      if(InpSplit)
+         Print("leg ticket ", legs[i], " comment='", PositionGetString(POSITION_COMMENT), "' lot=", DoubleToString(PositionGetDouble(POSITION_VOLUME), 2),
+               " fill=", DoubleToString(fill, digits), " tp=", DoubleToString(tp2, digits), " sl=", DoubleToString(sl2, digits));
       if(MathAbs(sl2 - PositionGetDouble(POSITION_SL)) > point || MathAbs(tp2 - PositionGetDouble(POSITION_TP)) > point)
          if(!trade.PositionModify(legs[i], sl2, tp2))
             Print("re-anchor failed for leg ", legs[i], " retcode=", trade.ResultRetcode());
@@ -391,16 +535,31 @@ void OpenBucket(int side, string why)
    // seconds since the current M1 bar opened = how late we entered versus the research's "next open"
    double delay = (double)(TimeCurrent() - iTime(g_symbol, PERIOD_M1, 0));
    LogRow("OPEN", side, n, avg, sl, tp, spread_pts, delay, 0.0, why);
+   g_be_done = false;
+   if(InpSplit)
+     {
+      g_shadow_on = true;
+      g_shadow_side = side;
+      g_shadow_bar = iTime(g_symbol, PERIOD_M1, 0);
+      g_shadow_tp = (side == 1) ? avg + g_targetDist : avg - g_targetDist;
+      g_shadow_sl = (side == 1) ? avg - InpStopDist : avg + InpStopDist;
+     }
 
-   double win_usd = 0.0, loss_usd = 0.0;
-   if(!OrderCalcProfit((side == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, g_symbol, InpLot * n, avg,
-                       (side == 1) ? avg + g_targetDist : avg - g_targetDist, win_usd))
-      win_usd = 0.0;
-   if(!OrderCalcProfit((side == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, g_symbol, InpLot * n, avg,
+   double win_usd = 0.0, loss_usd = 0.0, totlot = 0.0;
+   for(int i = 0; i < nPlan && i < n; i++)
+     {
+      double w1 = 0.0;
+      double td = InpSplit ? TpDist(i) : g_targetDist;
+      if(OrderCalcProfit((side == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, g_symbol, legLot[i], avg,
+                         (side == 1) ? avg + td : avg - td, w1))
+         win_usd += w1;
+      totlot += legLot[i];
+     }
+   if(!OrderCalcProfit((side == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, g_symbol, totlot, avg,
                        (side == 1) ? avg - InpStopDist : avg + InpStopDist, loss_usd))
       loss_usd = 0.0;
-   Notify(StringFormat("%s <b>BUCKET %s</b> %d x %.2f %s @ %.*f\nTarget %.*f (+$%.2f)  Stop %.*f (-$%.2f)\n%s",
-          (side == 1 ? "\xF0\x9F\x9F\xA2" : "\xF0\x9F\x94\xB4"), (side == 1 ? "BUY" : "SELL"), n, InpLot, g_symbol,
+   Notify(StringFormat("%s <b>BUCKET %s</b> %d legs (%s lot = %.2f) %s @ %.*f\nFull target %.*f (+$%.2f if all legs)  Stop %.*f (-$%.2f)\n%s",
+          (side == 1 ? "\xF0\x9F\x9F\xA2" : "\xF0\x9F\x94\xB4"), (side == 1 ? "BUY" : "SELL"), n, legtxt, totlot, g_symbol,
           digits, avg, digits, tp, MathAbs(win_usd), digits, sl, MathAbs(loss_usd), why));
   }
 
@@ -413,6 +572,7 @@ void LogCloseFromHistory()
    double profit = 0.0, pxsum = 0.0;
    int outs = 0;
    string reason = g_close_reason;
+   datetime lastT = 0;
    for(int k = 0; k < nid; k++)
      {
       if(!HistorySelectByPosition(g_ids[k]))
@@ -429,8 +589,10 @@ void LogCloseFromHistory()
            {
             outs++;
             pxsum += HistoryDealGetDouble(d, DEAL_PRICE);
-            if(reason == "")
+            datetime dtm = (datetime)HistoryDealGetInteger(d, DEAL_TIME);
+            if(g_close_reason == "" && dtm >= lastT)
               {
+               lastT = dtm;
                long r = HistoryDealGetInteger(d, DEAL_REASON);
                reason = (r == DEAL_REASON_TP) ? "TP" : (r == DEAL_REASON_SL) ? "SL" : "OTHER";
               }
@@ -439,6 +601,8 @@ void LogCloseFromHistory()
      }
    if(outs == 0)
       return;
+   if(InpSplit && reason == "SL" && profit > 0)
+      reason = "SL(BE)";
    LogRow("CLOSE", g_side, outs, pxsum / outs, 0, 0, 0, 0, profit, reason);
    g_last_close_time = TimeCurrent();
    g_last_close_win = (profit > 0);
@@ -467,11 +631,21 @@ void Step()
          CloseBucket(tickets, "BASKET_TP");
       else if(InpBasketStopUSD > 0 && floating <= -InpBasketStopUSD)
          CloseBucket(tickets, "BASKET_SL");
+      else if(InpSplit)
+         ManageSplit(tickets);
       return;
      }
 
    if(ArraySize(g_ids) > 0)
       LogCloseFromHistory();
+
+   // slot: no new bucket until the plain fixed-exit trade would have finished
+   if(g_shadow_on)
+     {
+      CheckShadow();
+      if(g_shadow_on)
+         return;
+     }
 
    // one decision per newly opened M1 bar
    datetime bar = iTime(g_symbol, PERIOD_M1, 0);
@@ -552,6 +726,29 @@ int OnInit()
       RememberLegs(tk);
       if(PositionSelectByTicket(tk[0]))
          g_side = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
+      if(InpSplit)
+        {
+         bool split = false;
+         double sum = 0.0;
+         datetime first = 0;
+         for(int i = 0; i < ArraySize(tk); i++)
+           {
+            if(!PositionSelectByTicket(tk[i])) continue;
+            if(StringFind(PositionGetString(POSITION_COMMENT), "-T") >= 0) split = true;
+            sum += PositionGetDouble(POSITION_PRICE_OPEN);
+            datetime pt = (datetime)PositionGetInteger(POSITION_TIME);
+            if(first == 0 || pt < first) first = pt;
+           }
+         if(split)
+           {
+            double avg0 = sum / ArraySize(tk);
+            g_shadow_on = true;
+            g_shadow_side = g_side;
+            g_shadow_bar = first - (first % 60);
+            g_shadow_tp = (g_side == 1) ? avg0 + g_targetDist : avg0 - g_targetDist;
+            g_shadow_sl = (g_side == 1) ? avg0 - InpStopDist : avg0 + InpStopDist;
+           }
+        }
      }
 
    EventSetTimer(1);
@@ -563,8 +760,8 @@ int OnInit()
    PrintFormat("MomentumEA v%d on %s | TimeGMT %02d:%02d  TimeCurrent %02d:%02d  TimeTradeServer %02d:%02d | %d legs x %.2f lot | dryrun=%s",
                InpVariant, g_symbol, a.hour, a.min, b.hour, b.min, c.hour, c.min, InpLegs, InpLot, InpDryRun ? "yes" : "no");
    if(InpSendStartupPing)
-      Notify(StringFormat("\xF0\x9F\xA4\x96 Started on %s, bucket of %d x %.2f lot (%.2f total)%s.\nSame exit as the research: target %.2f, stop %.2f of price.\nSize rule: full %d legs after a win, %d legs otherwise (0 = off).",
-             g_symbol, InpLegs, InpLot, InpLegs * InpLot, InpDryRun ? " (DRY RUN)" : "", g_targetDist, InpStopDist, InpLegs, InpWeakLegs));
+      Notify(StringFormat("\xF0\x9F\xA4\x96 Started on %s, bucket of %d x %.2f lot (%.2f total)%s.\nSame exit as the research: target %.2f, stop %.2f of price.\nSize rule: full %d legs after a win, %d legs otherwise (0 = off).\nSplit targets (T3) %s.",
+             g_symbol, InpLegs, InpLot, InpLegs * InpLot, InpDryRun ? " (DRY RUN)" : "", g_targetDist, InpStopDist, InpLegs, InpWeakLegs, InpSplit ? "ON: 3 legs at 50/75/100%, stop to entry after leg 1, slot kept" : "off"));
    return INIT_SUCCEEDED;
   }
 
