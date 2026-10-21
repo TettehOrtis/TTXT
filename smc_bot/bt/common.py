@@ -167,7 +167,7 @@ def simulate(sym, orders, one_at_a_time=True, cancel_limit_if_tp_first=True, max
                         "gross_pips": (px - fill) * d / P, "net_pips": net, "R": net / (planned / P),
                         "usd_01": net * USD_PIP_01[sym], "mfe_R": 0.0, "mae_R": 0.0})
             if one_at_a_time:
-                busy_until = t1[f]
+                busy_until = t1[f] + np.timedelta64(1, "m")      # same BT20 fix: no new entry in the bar of the exit
             continue
         if not risk > 0 or (not np.isnan(r.tp) and (r.tp - fill) * d <= 0):
             res.append({**row, "status": "invalid", "fill": fill}); continue
@@ -226,7 +226,10 @@ def simulate(sym, orders, one_at_a_time=True, cancel_limit_if_tp_first=True, max
                     "risk_pips": risk / P, "gross_pips": gross, "net_pips": net, "R": net / (risk / P),
                     "usd_01": net * USD_PIP_01[sym], "mfe_R": mfe, "mae_R": mae})
         if one_at_a_time:
-            busy_until = t1[k]
+            # BT20 (2026-10-20): the next entry may only start at the open of the bar AFTER the exit bar. It used to be allowed at the open of
+            # the exit bar itself (before the exit happened inside that bar), which gave every chained trade hindsight about that bar and
+            # inflated profit factor by about 0.2 (V4 plain exit: 1.11 -> 0.88 once fixed). Results produced before this fix are not valid.
+            busy_until = t1[k] + np.timedelta64(1, "m")
     out = pd.DataFrame(res)
     out.insert(0, "sym", sym)
     out["period"] = period_of(out.t_signal) if len(out) else []

@@ -108,6 +108,41 @@ Below 1.0 means losses are bigger than wins; above 1.0 means wins are
 bigger. A strategy can still lose money with a good ratio if it doesn't
 win often enough (AUT05 proves this — ratio 2.37, still lost everything).
 
+## Live bot on Oracle, and the time-stop test (Oct 16)
+
+- Oracle trade log pulled with the key in `sniper_mql5/HANDOFF.md`. Oct 12-16:
+  139 baskets, 74% win, net -$852, PF 0.68. Full file:
+  `logs/sniper_oracle/LIVE_ORACLE_REPORT.md`. Rerun: `tools/oracle_ea_report.py`.
+- Time-stop backtest (none / 5 / 15 / 20 min) on the last 1 and 2 months of
+  real Zero data: `smc_bot/results/LIVE_TIMESTOP/` (full JSON per run, plus
+  `ALL_TIMESTOP_RESULTS.json`). No time stop makes it profitable. PF 0.80-0.86
+  in every run. The window used (Jul 29 - Sep 29, 2026) is inside the sealed
+  period, so it is spent for this rule. Do not tune on it again.
+
+## Ideas 3 and 4 — four more studies, all closed (Oct 16)
+
+Brief: `smc_bot/bt/AUT11_14_BRIEF.md`. Each has `autopsy.json`, `report.md`,
+`BREAKDOWN.md` and a full plain JSON per variant in its own folder.
+
+| study | folder | result |
+|---|---|---|
+| AUT11 daily trend following (24 FX + gold) | `AUT11_trend` | no edge. 2008-09 carried the first window; 13 of 15 variants lost on the confirm window. Swap not in the data. |
+| AUT12 clock events (fixes, COMEX, 8:30 data, jobs) | `AUT12_clock` | no edge. 0 of 80 cells paid. COMEX fade beats a coin by ~$0.36, cost ~$1.85. |
+| AUT13 gold vs US dollar lag | `AUT13_leadlag` | no edge. Lag is under one minute; real bounce, too small. |
+| AUT14 combine small edges | `AUT14_combo` | no edge. Signals are not independent; gain was gold 2009-10 buys. |
+
+Total: 14 strategies closed, none with a proven edge. Smallest real signal
+found: AUT12 COMEX-open fade, about $0.36 a trade against about $1.85 cost.
+
+## AUT15 — how cheap would trading have to be? (Oct 16)
+
+`results/AUT15_costcut/` (report.md first). 100 variants replayed with no cost;
+30 earn something before cost in all three windows. None pays at today's cost.
+Best case: AUT13 gold dollar-gap fade, worst window can carry $0.83 a round trip
+against $1.59 paid, and makes only $0.04 a trade at $0.80. Real broker prices
+are NOT known: someone must check which account offers a round trip near $0.80
+and what its spread does at news. The cost menu in the report is hypothetical.
+
 ## Rules for whoever picks this up
 
 - Spread and commission are real money. Never remove them from a result.
@@ -116,3 +151,21 @@ win often enough (AUT05 proves this — ratio 2.37, still lost everything).
   and sell), not just one? Does it beat a coin flip? Does it still work on
   the next test window, not just the first one? Most things fail here.
 - Keep replies short. Plain words. No long explanations unless asked.
+
+## AUT35 - different exits to raise win rate (Oct 19)
+
+Ideas copied from free gold bots (trend-flip exit, split targets). 0 of 5 rules worked.
+Split targets raised win rate about 4 points with no trades lost, but cost about $1.1-1.3 a trade.
+Flip exits make trades pile up and the fee eats them. Keep the fixed exit.
+`results/AUT16_layers/SHAPERULE_REPORT.md`, script `bt/aut35_shaperule.py`, rules in PREREG.md addendum 21.
+Free bot copies for reference: C:\Users\Tetteh\Desktop\ea_study (read only, never run).
+
+## AUT36 - fix for the split-then-move-stop rule (Oct 19)
+
+Real cause of the loss in AUT35: re-entering early (2x trades, fees). If the bot waits until the plain trade would have ended, trades stay the same, win rate +4 to +24 points, money per day about the same for gentle shapes (H2_80, T3, H2_60). 0 of 14 passed the written bar (money per day a bit under in one window, STRESS drop a bit above). Not wired into the EA; needs a demo test.
+`results/AUT16_layers/SHAPERULE_REPORT.md` (bottom), `bt/aut36_splitbe.py`, PREREG addendum 22.
+
+## AUT37 - entry rules of the free bots (Oct 20)
+
+Trillex (EMA+SAR), mad808 (EMA+RSI), Stochastic Scalper, EMA 10/30 cross, tested as entries on gold and EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD. 0 of 60 passed; all but two near-zero forex cases lose money. Our entry stays. `results/AUT16_layers/BOTENTRIES_REPORT.md`, `bt/aut37_botentries.py`, PREREG addendum 23.
+AUT37 follow-up (addendum 24): the same free-bot rules as extra checks on our own entry (gold): 0 of 6 helped. Trend checks repeat our entry; pullback/stretch checks hurt. `BOTENTRIES_REPORT.md` bottom, `bt/aut38_mixfilters.py`.
